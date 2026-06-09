@@ -6,6 +6,7 @@ Usage:
     uv run python sync_todoist_to_grist.py
 """
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -89,62 +90,60 @@ def task_to_grist_fields(task: TodoistTask) -> GristFields:
     )
 
 
-def get_all_active_tasks() -> list[TodoistTask]:
+async def get_all_active_tasks(client: httpx.AsyncClient) -> list[TodoistTask]:
     headers = {"Authorization": f"Bearer {settings.todoist_api_token}"}
     all_tasks: list[TodoistTask] = []
     cursor: str | None = None
 
-    with httpx.Client(timeout=30.0) as client:
-        while True:
-            url = f"{TODOIST_BASE_URL}/tasks"
-            if cursor:
-                url += f"?cursor={cursor}"
+    while True:
+        url = f"{TODOIST_BASE_URL}/tasks"
+        if cursor:
+            url += f"?cursor={cursor}"
 
-            response = client.get(url, headers=headers)
-            if response.status_code != 200:
-                print(f"Failed to get active tasks: {response.status_code}")
-                return []
+        response = await client.get(url, headers=headers)
+        if response.status_code != 200:
+            print(f"Failed to get active tasks: {response.status_code}")
+            return []
 
-            data: dict[str, Any] = response.json()
-            results: list[dict[str, Any]] = data.get("results", [])
-            all_tasks.extend(TodoistTask.model_validate(r) for r in results)
-            cursor = data.get("next_cursor")
-            if not cursor:
-                break
+        data: dict[str, Any] = response.json()
+        results: list[dict[str, Any]] = data.get("results", [])
+        all_tasks.extend(TodoistTask.model_validate(r) for r in results)
+        cursor = data.get("next_cursor")
+        if not cursor:
+            break
 
     print(f"Found {len(all_tasks)} active tasks")
     return all_tasks
 
 
-def get_all_completed_tasks() -> list[TodoistTask]:
+async def get_all_completed_tasks(client: httpx.AsyncClient) -> list[TodoistTask]:
     headers = {"Authorization": f"Bearer {settings.todoist_api_token}"}
 
-    with httpx.Client(timeout=30.0) as client:
-        response = client.get(
-            f"{TODOIST_BASE_URL}/tasks/completed?limit=100",
-            headers=headers,
+    response = await client.get(
+        f"{TODOIST_BASE_URL}/tasks/completed?limit=100",
+        headers=headers,
+    )
+
+    if response.status_code != 200:
+        print(f"Failed to get completed tasks: {response.status_code}")
+        return []
+
+    data: dict[str, Any] = response.json()
+    items: list[dict[str, Any]] = data.get("items", [])
+    transformed: list[TodoistTask] = []
+    for item in items:
+        transformed.append(
+            TodoistTask(
+                id=item["task_id"],
+                content=item["content"],
+                checked=True,
+                updated_at=item.get("completed_at", ""),
+                project_id=item.get("project_id", ""),
+            )
         )
 
-        if response.status_code != 200:
-            print(f"Failed to get completed tasks: {response.status_code}")
-            return []
-
-        data: dict[str, Any] = response.json()
-        items: list[dict[str, Any]] = data.get("items", [])
-        transformed: list[TodoistTask] = []
-        for item in items:
-            transformed.append(
-                TodoistTask(
-                    id=item["task_id"],
-                    content=item["content"],
-                    checked=True,
-                    updated_at=item.get("completed_at", ""),
-                    project_id=item.get("project_id", ""),
-                )
-            )
-
-        print(f"Found {len(transformed)} completed tasks")
-        return transformed
+    print(f"Found {len(transformed)} completed tasks")
+    return transformed
 
 
 def sync_to_grist(tasks: list[TodoistTask]) -> tuple[int, int]:
@@ -204,18 +203,22 @@ def sync_to_grist(tasks: list[TodoistTask]) -> tuple[int, int]:
 
 @app.command()
 def sync() -> None:
-    print("Fetching active tasks from Todoist API v1...")
-    active_tasks = get_all_active_tasks()
-    print("Fetching completed tasks from Todoist API v1...")
-    completed_tasks = get_all_completed_tasks()
-    all_tasks = [*active_tasks, *completed_tasks]
-    print(f"Total tasks (active + completed): {len(all_tasks)}")
-    if not all_tasks:
-        print("No tasks to sync")
-        return
-    print("Syncing to Grist...")
-    added, updated = sync_to_grist(all_tasks)
-    print(f"Done! Added: {added}, Updated: {updated}")
+    async def _run() -> None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            active_tasks, completed_tasks = await asyncio.gather(
+                get_all_active_tasks(client),
+                get_all_completed_tasks(client),
+            )
+        all_tasks = [*active_tasks, *completed_tasks]
+        print(f"Total tasks (active + completed): {len(all_tasks)}")
+        if not all_tasks:
+            print("No tasks to sync")
+            return
+        print("Syncing to Grist...")
+        added, updated = sync_to_grist(all_tasks)
+        print(f"Done! Added: {added}, Updated: {updated}")
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
