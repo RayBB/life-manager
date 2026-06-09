@@ -15,10 +15,10 @@ import httpx
 import typer
 from pydantic import BaseModel, Field
 
+from grist_api import async_grist_get, async_grist_patch, async_grist_post
 from settings import settings
 
 app = typer.Typer(no_args_is_help=True)
-GRIST_BASE_URL = f"https://docs.getgrist.com/api/docs/{settings.grist_doc_id}"
 TODOIST_BASE_URL = "https://api.todoist.com/api/v1"
 
 
@@ -133,17 +133,10 @@ async def get_all_completed_tasks(client: httpx.AsyncClient) -> list[TodoistTask
 
 
 async def sync_to_grist(tasks: list[TodoistTask], client: httpx.AsyncClient) -> tuple[int, int]:
-    headers = {"Authorization": f"Bearer {settings.grist_api_key}"}
-
-    response = await client.get(
-        f"{GRIST_BASE_URL}/tables/Todoist/data",
-        headers=headers,
-    )
-    if response.status_code != 200:
-        print(f"Failed to read Grist table: {response.status_code}")
+    data = await async_grist_get("Todoist", client)
+    if data is None:
         return 0, 0
 
-    data: dict[str, Any] = response.json()
     existing_ids: set[str] = set()
     grist_id_map: dict[str, int] = {}
 
@@ -167,21 +160,13 @@ async def sync_to_grist(tasks: list[TodoistTask], client: httpx.AsyncClient) -> 
             records_to_add.append({"fields": fields})
 
     if records_to_add:
-        add_response = await client.post(
-            f"{GRIST_BASE_URL}/tables/Todoist/records",
-            headers=headers,
-            json={"records": records_to_add},
-        )
+        add_response = await async_grist_post("Todoist", records_to_add, client)
         print(f"Added {len(records_to_add)} new tasks")
         if add_response.status_code not in (200, 201):
             print(f"Add error: {add_response.text}")
 
     if records_to_update:
-        update_response = await client.patch(
-            f"{GRIST_BASE_URL}/tables/Todoist/records",
-            headers=headers,
-            json={"records": records_to_update},
-        )
+        update_response = await async_grist_patch("Todoist", records_to_update, client)
         print(f"Updated {len(records_to_update)} existing tasks")
         if update_response.status_code not in (200, 201):
             print(f"Update error: {update_response.text}")

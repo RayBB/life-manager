@@ -7,17 +7,14 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-import httpx
 import typer
 from pydantic import BaseModel, Field, field_validator
 
-from settings import settings
+from grist_api import grist_get, grist_patch, grist_post, rows_from_data
 
 app = typer.Typer(no_args_is_help=True)
 log_app = typer.Typer(no_args_is_help=True)
 app.add_typer(log_app, name="log")
-
-GRIST_BASE_URL = f"https://docs.getgrist.com/api/docs/{settings.grist_doc_id}"
 
 
 class ProjectStatus(str, Enum):
@@ -74,48 +71,6 @@ class LogEntry(BaseModel):
     target_task: int | None = Field(None, alias="Target_Task")
 
 
-def _rows[M: BaseModel](data: dict[str, Any] | None, model: type[M]) -> list[M]:
-    """Convert Grist columnar data to a list of model instances."""
-    if not data:
-        return []
-    ids: list[int] = data.get("id", [])
-    results = []
-    for i in range(len(ids)):
-        row: dict[str, Any] = {}
-        for field_name, field_info in model.model_fields.items():
-            alias = field_info.alias or field_name
-            col = data.get(alias, [])
-            val = col[i] if i < len(col) else None
-            if val is not None:
-                row[alias] = val
-        results.append(model.model_validate(row))
-    return results
-
-
-def grist_get(table: str, params: dict[str, str] | None = None) -> dict[str, Any] | None:
-    """Make a GET request to Grist API."""
-    with httpx.Client(timeout=10.0) as client:
-        url = f"{GRIST_BASE_URL}/tables/{table}/data"
-        resp = client.get(
-            url, headers={"Authorization": f"Bearer {settings.grist_api_key}"}, params=params
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        else:
-            print(f"Error fetching {table}: {resp.status_code} - {resp.text}")
-            return None
-
-
-def grist_patch(table: str, records: list[dict[str, Any]]) -> httpx.Response:
-    """Update records in Grist via PATCH."""
-    with httpx.Client(timeout=10.0) as client:
-        return client.patch(
-            f"{GRIST_BASE_URL}/tables/{table}/records",
-            headers={"Authorization": f"Bearer {settings.grist_api_key}"},
-            json={"records": records},
-        )
-
-
 def _build_todoist_index(items: list[TodoistItem]) -> dict[str, list[TodoistItem]]:
     """Build a dict mapping label → list of tasks from Todoist data."""
     label_index: dict[str, list[TodoistItem]] = {}
@@ -137,7 +92,7 @@ def _build_log_index(entries: list[LogEntry]) -> dict[int, list[LogEntry]]:
 
 def _log_id_to_grist_id(log_id: int) -> int | None:
     """Look up a Grist internal ID from a stable LogId."""
-    entries = _rows(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
     for e in entries:
         if e.log_id == log_id:
             return e.id
@@ -146,14 +101,14 @@ def _log_id_to_grist_id(log_id: int) -> int | None:
 
 def grist_query_by_label(label_name: str) -> list[TodoistItem]:
     """Get all Todoist tasks with a specific label."""
-    items = _rows(grist_get("Todoist"), TodoistItem)
+    items = rows_from_data(grist_get("Todoist"), TodoistItem)
     index = _build_todoist_index(items)
     return index.get(label_name, [])
 
 
 def get_commitment(title: str) -> Commitment | None:
     """Get a commitment by title."""
-    for c in _rows(grist_get("Commitments"), Commitment):
+    for c in rows_from_data(grist_get("Commitments"), Commitment):
         if c.title == title:
             return c
     return None
@@ -161,7 +116,7 @@ def get_commitment(title: str) -> Commitment | None:
 
 def get_project(title: str) -> GristProject | None:
     """Get a project by title."""
-    for p in _rows(grist_get("Project"), GristProject):
+    for p in rows_from_data(grist_get("Project"), GristProject):
         if p.title == title:
             return p
     return None
@@ -180,7 +135,7 @@ def get_log_entries(
         entries.sort(key=lambda x: x.effective_date or "", reverse=True)
         return entries[:limit]
 
-    entries = _rows(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
 
     if target_project_id:
         entries = [e for e in entries if e.target_project == target_project_id]
@@ -214,7 +169,7 @@ def query_commitment(name: str) -> None:
     print(f"{'=' * 60}")
     print(f"\nDescription: {commitment.description or 'None'}")
 
-    projects = _rows(grist_get("Project"), GristProject)
+    projects = rows_from_data(grist_get("Project"), GristProject)
     matching = [p for p in projects if p.commitment == commitment.id]
 
     print(f"\n--- Projects ({len(matching)}) ---")
@@ -274,7 +229,7 @@ def query_project(name: str) -> None:
     if project.status:
         print(f"Status: {project.status}")
 
-    all_commitments = _rows(grist_get("Commitments"), Commitment)
+    all_commitments = rows_from_data(grist_get("Commitments"), Commitment)
     if project.commitment:
         for c in all_commitments:
             if c.id == project.commitment:
@@ -315,7 +270,7 @@ def query_project(name: str) -> None:
 @app.command()
 def commitments() -> None:
     """List all commitments."""
-    items = _rows(grist_get("Commitments"), Commitment)
+    items = rows_from_data(grist_get("Commitments"), Commitment)
     if not items:
         print("No commitments found")
         return
@@ -356,14 +311,14 @@ def get_last_action_for_project(
 @app.command()
 def projects() -> None:
     """List all projects with their commitment, status, and last action."""
-    project_list = _rows(grist_get("Project"), GristProject)
+    project_list = rows_from_data(grist_get("Project"), GristProject)
     if not project_list:
         print("No projects found")
         return
 
-    todoist_index = _build_todoist_index(_rows(grist_get("Todoist"), TodoistItem))
-    log_index = _build_log_index(_rows(grist_get("LogEntries"), LogEntry))
-    commitments = {c.id: c.title for c in _rows(grist_get("Commitments"), Commitment)}
+    todoist_index = _build_todoist_index(rows_from_data(grist_get("Todoist"), TodoistItem))
+    log_index = _build_log_index(rows_from_data(grist_get("LogEntries"), LogEntry))
+    commitments = {c.id: c.title for c in rows_from_data(grist_get("Commitments"), Commitment)}
 
     print(f"\n{'=' * 60}")
     print(f"ALL PROJECTS ({len(project_list)})")
@@ -382,7 +337,7 @@ def projects() -> None:
 
 def _get_next_log_id() -> int:
     """Find the next available LogId by taking max existing + 1."""
-    entries = _rows(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
     valid = [e.log_id for e in entries if e.log_id is not None]
     return max(valid) + 1 if valid else 1
 
@@ -404,20 +359,15 @@ def add_log_entry(
     if commitment_id:
         fields["Target_Commitment"] = commitment_id
 
-    with httpx.Client(timeout=10.0) as client:
-        resp = client.post(
-            f"{GRIST_BASE_URL}/tables/LogEntries/records",
-            headers={"Authorization": f"Bearer {settings.grist_api_key}"},
-            json={"records": [{"fields": fields}]},
-        )
+    resp = grist_post("tables/LogEntries/records", {"records": [{"fields": fields}]})
 
-        if resp.status_code in (200, 201):
-            print(f"\u2713 Log entry created (L#{log_id})")
-            return True
-        else:
-            print(f"\u2717 Failed to create log entry: {resp.status_code}")
-            print(f"  {resp.text}")
-            return False
+    if resp.status_code in (200, 201):
+        print(f"\u2713 Log entry created (L#{log_id})")
+        return True
+    else:
+        print(f"\u2717 Failed to create log entry: {resp.status_code}")
+        print(f"  {resp.text}")
+        return False
 
 
 def update_log_entry(
@@ -457,30 +407,25 @@ def delete_log_entry(log_id: int) -> bool:
         print(f"Error: No log entry found with LogId {log_id}")
         return False
 
-    with httpx.Client(timeout=10.0) as client:
-        resp = client.post(
-            f"{GRIST_BASE_URL}/apply",
-            headers={"Authorization": f"Bearer {settings.grist_api_key}"},
-            json=[["BulkRemoveRecord", "LogEntries", [grist_id]]],
-        )
+    resp = grist_post("apply", [["BulkRemoveRecord", "LogEntries", [grist_id]]])
 
-        if resp.status_code in (200, 201):
-            print(f"\u2713 Log entry L#{log_id} deleted")
-            return True
-        else:
-            print(f"\u2717 Failed to delete log entry: {resp.status_code}")
-            print(f"  {resp.text}")
-            return False
+    if resp.status_code in (200, 201):
+        print(f"\u2713 Log entry L#{log_id} deleted")
+        return True
+    else:
+        print(f"\u2717 Failed to delete log entry: {resp.status_code}")
+        print(f"  {resp.text}")
+        return False
 
 
 def _build_project_titles() -> dict[int, str]:
     """Build a dict mapping project id → project title."""
-    return {p.id: p.title for p in _rows(grist_get("Project"), GristProject)}
+    return {p.id: p.title for p in rows_from_data(grist_get("Project"), GristProject)}
 
 
 def list_logs(limit: int = 30, project_filter: str | None = None) -> None:
     """List all log entries with project names."""
-    entries = _rows(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
     if not entries:
         print("No log entries found")
         return
@@ -518,7 +463,7 @@ def list_logs(limit: int = 30, project_filter: str | None = None) -> None:
 
 def search_logs(query: str, limit: int = 20) -> None:
     """Search log entries by content (case-insensitive)."""
-    entries = _rows(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
     if not entries:
         print("No log entries found")
         return
@@ -667,7 +612,7 @@ def delete(
 ) -> None:
     """Delete a log entry."""
     if not yes:
-        entries = _rows(grist_get("LogEntries"), LogEntry)
+        entries = rows_from_data(grist_get("LogEntries"), LogEntry)
         for e in entries:
             if e.log_id == log_id:
                 date_str = format_timestamp(e.effective_date)
