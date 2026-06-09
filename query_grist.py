@@ -21,9 +21,11 @@ app = typer.Typer(no_args_is_help=True)
 log_app = typer.Typer(no_args_is_help=True)
 commitment_app = typer.Typer(no_args_is_help=True)
 project_app = typer.Typer(no_args_is_help=True)
-app.add_typer(log_app, name="log")
-app.add_typer(commitment_app, name="commitment")
-app.add_typer(project_app, name="project")
+app.add_typer(
+    log_app, name="log", help="Activity log entries (add, list, search, view, update, delete)"
+)
+app.add_typer(commitment_app, name="commitment", help="Manage commitments (list, create, update)")
+app.add_typer(project_app, name="project", help="Manage projects (list, create, update, status)")
 
 
 @app.callback()
@@ -174,28 +176,6 @@ def format_timestamp(ts: Any) -> str:
     if isinstance(ts, (int, float)):
         return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
     return str(ts)[:10]
-
-
-def _print_task_sections(tasks: list[TodoistItem]) -> None:
-    """Print upcoming and recently completed Todoist tasks."""
-    if not tasks:
-        print("  No tasks with this label")
-        return
-
-    upcoming = [t for t in tasks if not t.checked]
-    completed = [t for t in tasks if t.checked]
-    upcoming.sort(key=lambda x: x.due_date or "zzz")
-
-    if upcoming:
-        print(f"\n  Upcoming ({len(upcoming)}):")
-        for t in upcoming:
-            due = f" (due: {t.due_string or t.due_date})" if t.due_string or t.due_date else ""
-            print(f"    \u25cb {t.content[:55]}{due}")
-
-    if completed:
-        print(f"\n  Recently Completed (showing {min(3, len(completed))}):")
-        for t in completed[:3]:
-            print(f"    \u2713 {t.content[:55]}")
 
 
 async def get_last_action_for_project(
@@ -872,8 +852,11 @@ def update_project(
     name: str = typer.Argument(help="Current name of the project"),
     new_title: str | None = typer.Option(None, "--title", "-t", help="New title"),
     description: str | None = typer.Option(None, "--description", "-d", help="New description"),
+    commitment_name: str | None = typer.Option(
+        None, "--commitment", "-c", help="Move to a different commitment"
+    ),
 ) -> None:
-    """Update a project's title and/or description."""
+    """Update a project's title, description, and/or parent commitment."""
 
     async def _run() -> None:
         project = await get_project(name)
@@ -886,9 +869,15 @@ def update_project(
             fields["Title"] = new_title
         if description is not None:
             fields["Description"] = description
+        if commitment_name is not None:
+            commitment = await get_commitment(commitment_name)
+            if not commitment:
+                print(f"Error: Commitment '{commitment_name}' not found")
+                raise typer.Exit(1)
+            fields["Commitment"] = commitment.id
 
         if not fields:
-            print("Error: Nothing to update (provide --title and/or --description)")
+            print("Error: Nothing to update (provide --title, --description, and/or --commitment)")
             raise typer.Exit(1)
 
         resp = await grist_patch("Project", [{"id": project.id, "fields": fields}])
@@ -898,6 +887,8 @@ def update_project(
                 parts.append(f"title -> '{new_title}'")
             if description is not None:
                 parts.append("description updated")
+            if commitment_name is not None:
+                parts.append(f"commitment -> '{commitment_name}'")
             print(f"\u2713 Project '{name}' updated ({', '.join(parts)})")
         else:
             print(f"\u2717 Failed to update project: {resp.status_code}")
