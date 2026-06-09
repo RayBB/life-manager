@@ -6,6 +6,8 @@ Usage:
     uv run python sync_todoist_to_grist.py
 """
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any
 
@@ -39,6 +41,26 @@ class TodoistTask(BaseModel):
     updated_at: str = ""
     completed_at: str | None = None
 
+    def to_grist_fields(self) -> GristFields:
+        updated_at = self.completed_at if (self.checked and self.completed_at) else self.updated_at
+        due_date = None
+        if self.due:
+            due_date = self.due.datetime or (self.due.date[:10] if self.due.date else None)
+
+        return GristFields(
+            todoist_id=self.id,
+            content=self.content,
+            description=self.description,
+            priority=self.priority,
+            due_date=due_date,
+            due_string=self.due.string if self.due else "",
+            project_id=self.project_id,
+            labels=["L", *self.labels] if self.labels else None,
+            checked=self.checked,
+            added_at=self.added_at,
+            updated_at=updated_at,
+        )
+
 
 class GristFields(BaseModel):
     todoist_id: str = Field("", serialization_alias="TodoistId")
@@ -52,42 +74,6 @@ class GristFields(BaseModel):
     checked: bool = Field(False, serialization_alias="Checked")
     added_at: str = Field("", serialization_alias="AddedAt")
     updated_at: str = Field("", serialization_alias="UpdatedAt")
-
-
-def parse_due_date(due: TodoistDue | None) -> str | None:
-    if due is None:
-        return None
-    if due.datetime:
-        return due.datetime
-    if due.date:
-        return due.date[:10]
-    return None
-
-
-def format_labels_for_grist(labels: list[str]) -> list[str] | None:
-    if not labels:
-        return None
-    return ["L", *labels]
-
-
-def task_to_grist_fields(task: TodoistTask) -> GristFields:
-    updated_at = task.updated_at
-    if task.checked and task.completed_at:
-        updated_at = task.completed_at
-
-    return GristFields(
-        todoist_id=task.id,
-        content=task.content,
-        description=task.description,
-        priority=task.priority,
-        due_date=parse_due_date(task.due),
-        due_string=task.due.string if task.due else "",
-        project_id=task.project_id,
-        labels=format_labels_for_grist(task.labels),
-        checked=task.checked,
-        added_at=task.added_at,
-        updated_at=updated_at,
-    )
 
 
 async def get_all_active_tasks(client: httpx.AsyncClient) -> list[TodoistTask]:
@@ -146,57 +132,59 @@ async def get_all_completed_tasks(client: httpx.AsyncClient) -> list[TodoistTask
     return transformed
 
 
-def sync_to_grist(tasks: list[TodoistTask]) -> tuple[int, int]:
+async def sync_to_grist(tasks: list[TodoistTask], client: httpx.AsyncClient) -> tuple[int, int]:
     headers = {"Authorization": f"Bearer {settings.grist_api_key}"}
 
-    with httpx.Client(timeout=10.0) as client:
-        response = client.get(
-            f"{GRIST_BASE_URL}/tables/Todoist/data",
+    response = await client.get(
+        f"{GRIST_BASE_URL}/tables/Todoist/data",
+        headers=headers,
+    )
+    if response.status_code != 200:
+        print(f"Failed to read Grist table: {response.status_code}")
+        return 0, 0
+
+    data: dict[str, Any] = response.json()
+    existing_ids: set[str] = set()
+    grist_id_map: dict[str, int] = {}
+
+    todoist_ids: list[str] = data.get("TodoistId", [])
+    grist_ids: list[int] = data.get("id", [])
+    for tid, gid in zip(todoist_ids, grist_ids):
+        if tid:
+            existing_ids.add(tid)
+            grist_id_map[tid] = gid
+
+    records_to_add: list[dict[str, Any]] = []
+    records_to_update: list[dict[str, Any]] = []
+
+    for task in tasks:
+        if not task.id:
+            continue
+        fields = task.to_grist_fields().model_dump(mode="json", by_alias=True)
+        if task.id in existing_ids:
+            records_to_update.append({"id": grist_id_map[task.id], "fields": fields})
+        else:
+            records_to_add.append({"fields": fields})
+
+    if records_to_add:
+        add_response = await client.post(
+            f"{GRIST_BASE_URL}/tables/Todoist/records",
             headers=headers,
+            json={"records": records_to_add},
         )
-        existing_ids: set[str] = set()
-        grist_id_map: dict[str, int] = {}
+        print(f"Added {len(records_to_add)} new tasks")
+        if add_response.status_code not in (200, 201):
+            print(f"Add error: {add_response.text}")
 
-        if response.status_code == 200:
-            data: dict[str, Any] = response.json()
-            todoist_ids: list[str] = data.get("TodoistId", [])
-            grist_ids: list[int] = data.get("id", [])
-            for tid, gid in zip(todoist_ids, grist_ids):
-                if tid:
-                    existing_ids.add(tid)
-                    grist_id_map[tid] = gid
-
-        records_to_add: list[dict[str, Any]] = []
-        records_to_update: list[dict[str, Any]] = []
-
-        for task in tasks:
-            if not task.id:
-                continue
-            fields = task_to_grist_fields(task).model_dump(mode="json", by_alias=True)
-            if task.id in existing_ids:
-                records_to_update.append({"id": grist_id_map[task.id], "fields": fields})
-            else:
-                records_to_add.append({"fields": fields})
-
-        if records_to_add:
-            add_response = client.post(
-                f"{GRIST_BASE_URL}/tables/Todoist/records",
-                headers=headers,
-                json={"records": records_to_add},
-            )
-            print(f"Added {len(records_to_add)} new tasks")
-            if add_response.status_code not in (200, 201):
-                print(f"Add error: {add_response.text}")
-
-        if records_to_update:
-            update_response = client.patch(
-                f"{GRIST_BASE_URL}/tables/Todoist/records",
-                headers=headers,
-                json={"records": records_to_update},
-            )
-            print(f"Updated {len(records_to_update)} existing tasks")
-            if update_response.status_code not in (200, 201):
-                print(f"Update error: {update_response.text}")
+    if records_to_update:
+        update_response = await client.patch(
+            f"{GRIST_BASE_URL}/tables/Todoist/records",
+            headers=headers,
+            json={"records": records_to_update},
+        )
+        print(f"Updated {len(records_to_update)} existing tasks")
+        if update_response.status_code not in (200, 201):
+            print(f"Update error: {update_response.text}")
 
     return len(records_to_add), len(records_to_update)
 
@@ -209,14 +197,14 @@ def sync() -> None:
                 get_all_active_tasks(client),
                 get_all_completed_tasks(client),
             )
-        all_tasks = [*active_tasks, *completed_tasks]
-        print(f"Total tasks (active + completed): {len(all_tasks)}")
-        if not all_tasks:
-            print("No tasks to sync")
-            return
-        print("Syncing to Grist...")
-        added, updated = sync_to_grist(all_tasks)
-        print(f"Done! Added: {added}, Updated: {updated}")
+            all_tasks = [*active_tasks, *completed_tasks]
+            print(f"Total tasks (active + completed): {len(all_tasks)}")
+            if not all_tasks:
+                print("No tasks to sync")
+                return
+            print("Syncing to Grist...")
+            added, updated = await sync_to_grist(all_tasks, client)
+            print(f"Done! Added: {added}, Updated: {updated}")
 
     asyncio.run(_run())
 
