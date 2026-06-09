@@ -61,12 +61,10 @@ This lets you query at either level:
 ### `sync_todoist_to_grist.py` — Sync Todoist → Grist
 
 ```bash
-uv run python sync_todoist_to_grist.py sync
+uv run python sync_todoist_to_grist.py
 ```
 
 Fetches all active tasks (with pagination) and the last 100 completed tasks from Todoist API v1, then upserts them into the Grist `Todoist` table. Handles the transformation from Todoist's API format to Grist's column schema.
-
-> **Note:** This script also contains query functions internally, but `query_grist.py` (below) is the recommended tool for all read operations.
 
 ### `query_grist.py` — Query Grist from the terminal
 
@@ -118,7 +116,7 @@ Commitment: Lab of Thought
 ## Data Flow
 
 1. **Create/complete tasks in Todoist** (your daily workflow)
-2. **Run sync** → `uv run python sync_todoist_to_grist.py sync`
+2. **Run sync** → `uv run python sync_todoist_to_grist.py`
 3. **Query** → `uv run python query_grist.py projects` or `query "Project Name"`
 
 The sync is a one-way pull from Todoist into Grist. For Todoist data, Grist is read-only — all task edits happen in Todoist. Activity log entries (LogEntries) are created directly in Grist.
@@ -129,16 +127,19 @@ Record what you're working on without leaving the terminal:
 
 ```bash
 # Log to a project
-uv run python query_grist.py log "Replied to Ming about commission" --project "Mobility Language Matters"
+uv run python query_grist.py log add "Replied to Ming about commission" --project "Mobility Language Matters"
 
 # Log to a commitment (appears under all its projects)
-uv run python query_grist.py log "Kickoff meeting" --commitment "hackNY"
+uv run python query_grist.py log add "Kickoff meeting" --commitment "hackNY"
 
 # With a specific date/time for past events
-uv run python query_grist.py log "Had a great meeting" --project "Garage City" --date "2026-06-02 2:30pm"
+uv run python query_grist.py log add "Had a great meeting" --project "Garage City" --date "2026-06-02 2:30pm"
 
-# With an author
-uv run python query_grist.py log "Sent the invoice" --project "NBMI 2026" --author "Ray" --date "2026-06-04"
+# Log list, search, update, delete
+uv run python query_grist.py log list --limit 10
+uv run python query_grist.py log view "meeting" --limit 5
+uv run python query_grist.py log update 42 --content "Updated text"
+uv run python query_grist.py log delete 42 --yes
 ```
 
 Requires either `--project` or `--commitment` (not both). The log entry appears in:
@@ -151,8 +152,8 @@ Requires either `--project` or `--commitment` (not both). The log entry appears 
 Requires Python 3.10+ and `uv` package manager.
 
 ```bash
-uv run python sync_todoist_to_grist.py sync  # First sync
+uv run python sync_todoist_to_grist.py  # First sync
 uv run python query_grist.py projects         # See your projects
 ```
 
-API keys are currently hardcoded in the scripts. To change them, edit the configuration section at the top of each file.
+API keys are configured via a `.env` file at the project root — see `settings.py` for the required variables.

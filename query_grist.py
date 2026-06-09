@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
 Query Grist for Projects, Commitments, and Todoist tasks
-
-Usage:
-    uv run python query_grist.py commitments          # List all commitments
-    uv run python query_grist.py projects             # List all projects
-    uv run python query_grist.py query "Lab of Thought"  # Query a commitment
-    uv run python query_grist.py query "Urbanism Now Jobs Site"  # Query a project
 """
 
 from datetime import UTC
+from enum import Enum
+from typing import Any
 
 import httpx
+import typer
 
 from settings import settings
+
+app = typer.Typer(no_args_is_help=True)
+log_app = typer.Typer(no_args_is_help=True)
+app.add_typer(log_app, name="log")
 
 GRIST_BASE_URL = f"https://docs.getgrist.com/api/docs/{settings.grist_doc_id}"
 
 
-def grist_get(table, params=None):
+class ProjectStatus(str, Enum):
+    active = "active"
+    stalled = "stalled"
+    waiting = "waiting"
+    done = "done"
+
+
+def grist_get(table: str, params: dict[str, str] | None = None) -> dict[str, Any] | None:
     """Make a GET request to Grist API."""
     with httpx.Client(timeout=10.0) as client:
         url = f"{GRIST_BASE_URL}/tables/{table}/data"
@@ -398,7 +406,8 @@ def query_project(name):
     print()
 
 
-def list_commitments():
+@app.command()
+def commitments():
     """List all commitments."""
     data = grist_get("Commitments")
     if not data:
@@ -453,7 +462,8 @@ def get_last_action_for_project(
     return best
 
 
-def list_projects():
+@app.command()
+def projects():
     """List all projects with their commitment, status, and last action."""
     # Fetch all data upfront to avoid N+1 queries
     data = grist_get("Project")
@@ -640,7 +650,7 @@ def list_logs(limit=30, project_filter=None):
     for e in entries:
         lid = f"L#{e['log_id']}" if e["log_id"] else "#?"
         proj = f" [{e['project']}]" if e["project"] else ""
-        print(f"  [{lid}] [{e['date']}]{proj} {e['content'][:60]}")
+        print(f"  [{lid}] [{e['date']}]{proj} {(e.get('content') or '')[:60]}")
     print()
 
 
@@ -684,337 +694,143 @@ def search_logs(query, limit=20):
     for e in matches:
         lid = f"L#{e['log_id']}" if e["log_id"] else "#?"
         proj = f" [{e['project']}]" if e["project"] else ""
-        print(f"  [{lid}] [{e['date']}]{proj} {e['content'][:60]}")
+        print(f"  [{lid}] [{e['date']}]{proj} {(e.get('content') or '')[:60]}")
     print()
 
 
-def set_status(project_name, new_status):
-    """Set the status of a project.
-
-    Valid statuses: active, stalled, waiting, done
-    """
-    valid = ["active", "stalled", "waiting", "done"]
-    if new_status not in valid:
-        print(f"Error: Status must be one of: {', '.join(valid)}")
-        return False
-
+@app.command()
+def status(
+    project_name: str = typer.Argument(help="Name of the project"),
+    new_status: ProjectStatus = typer.Argument(help="New status"),
+):
+    """Set the status of a project."""
     project = get_project(project_name)
     if not project:
         print(f"Error: Project '{project_name}' not found")
-        return False
+        raise typer.Exit(1)
 
-    resp = grist_patch("Project", [{"id": project["id"], "fields": {"Status": new_status}}])
+    resp = grist_patch("Project", [{"id": project["id"], "fields": {"Status": new_status.value}}])
 
     if resp.status_code in (200, 201):
-        print(f"✓ {project_name} → {new_status}")
-        return True
+        print(f"✓ {project_name} → {new_status.value}")
     else:
         print(f"✗ Failed to update status: {resp.status_code}")
         print(f"  {resp.text}")
-        return False
+        raise typer.Exit(1)
 
 
-def main():
-    import sys
-
-    if len(sys.argv) > 1:
-        cmd = sys.argv[1]
-
-        if cmd == "commitments":
-            list_commitments()
-
-        elif cmd == "projects":
-            list_projects()
-
-        elif cmd == "query" and len(sys.argv) > 2:
-            name = " ".join(sys.argv[2:])
-            commitment = get_commitment(name)
-            if commitment:
-                query_commitment(name)
-            else:
-                project = get_project(name)
-                if project:
-                    query_project(name)
-                else:
-                    print(f"'{name}' not found as a commitment or project")
-
-        elif cmd == "log":
-            args = sys.argv[2:]
-
-            # log list [--limit <n>] [--project <name>]
-            if args and args[0] == "list":
-                other_args = args[1:]
-                limit = 30
-                project_filter = None
-
-                i = 0
-                while i < len(other_args):
-                    if other_args[i] == "--limit" and i + 1 < len(other_args):
-                        try:
-                            limit = int(other_args[i + 1])
-                        except ValueError:
-                            pass
-                        i += 2
-                    elif other_args[i] == "--project" and i + 1 < len(other_args):
-                        project_filter = other_args[i + 1]
-                        i += 2
-                    else:
-                        i += 1
-
-                list_logs(limit=limit, project_filter=project_filter)
-                return
-
-            # log view <query>
-            if args and args[0] == "view":
-                view_args = args[1:]
-                if not view_args or view_args[0].startswith("--"):
-                    print("Usage: uv run python query_grist.py log view <query> [--limit <n>]")
-                    return
-
-                query = view_args[0]
-                limit = 20
-                for i in range(1, len(view_args)):
-                    if view_args[i] == "--limit" and i + 1 < len(view_args):
-                        try:
-                            limit = int(view_args[i + 1])
-                        except ValueError:
-                            pass
-
-                search_logs(query, limit=limit)
-                return
-
-            # log delete <id> [--yes]
-            if args and args[0] == "delete":
-                delete_args = args[1:]
-                if not delete_args or delete_args[0].startswith("--"):
-                    print("Usage: uv run python query_grist.py log delete <id> [--yes]")
-                    return
-
-                try:
-                    log_id = int(delete_args[0])
-                except ValueError:
-                    print(f"Error: <id> must be a number, got '{delete_args[0]}'")
-                    return
-
-                confirmed = "--yes" in delete_args
-                if not confirmed:
-                    # Show the entry before asking
-                    data = grist_get("LogEntries")
-                    if data:
-                        log_ids = data.get("LogId", [])
-                        content_list = data.get("Content", [])
-                        dates = data.get("EffectiveDate", [])
-                        for i in range(len(log_ids)):
-                            if log_ids[i] == log_id:
-                                from datetime import datetime
-
-                                ts = dates[i] if i < len(dates) else None
-                                date_str = ""
-                                if isinstance(ts, (int, float)):
-                                    date_str = datetime.fromtimestamp(ts, tz=UTC).strftime(
-                                        "%Y-%m-%d"
-                                    )
-                                print(f"Log entry L#{log_id}: [{date_str}] {content_list[i][:80]}")
-                                break
-
-                    print("Use --yes to confirm deletion")
-                    return
-
-                delete_log_entry(log_id)
-                return
-
-            # log update <id> [--date <date>] [--content <text>]
-            if args and args[0] == "update":
-                update_args = args[1:]
-                if not update_args or update_args[0].startswith("--"):
-                    print(
-                        "Usage: uv run python query_grist.py log update <id> [--date <date>] [--content <text>]"
-                    )
-                    return
-
-                try:
-                    log_id = int(update_args[0])
-                except ValueError:
-                    print(f"Error: <id> must be a number, got '{update_args[0]}'")
-                    return
-
-                other_args = update_args[1:]
-                activity_date = None
-                content = None
-
-                i = 0
-                while i < len(other_args):
-                    if other_args[i] == "--date" and i + 1 < len(other_args):
-                        activity_date = other_args[i + 1]
-                        i += 2
-                    elif other_args[i] == "--content" and i + 1 < len(other_args):
-                        content = other_args[i + 1]
-                        i += 2
-                    else:
-                        i += 1
-
-                update_log_entry(log_id, content=content, activity_date=activity_date)
-                return
-
-            # log <content> --project <name> (original add command)
-            if not args:
-                print(
-                    "Usage: uv run python query_grist.py log <content> --project <name> [options]"
-                )
-                print("       [--commitment <name>] [--date <date>]")
-                print(
-                    "   or: uv run python query_grist.py log update <id> [--date <date>] [--content <text>]"
-                )
-                return
-
-            content_parts = []
-            other_args = []
-            found_flag = False
-            for arg in args:
-                if arg.startswith("--"):
-                    found_flag = True
-                if found_flag:
-                    other_args.append(arg)
-                else:
-                    content_parts.append(arg)
-
-            content = " ".join(content_parts)
-
-            if not content.strip():
-                print("Error: Content is required (the log message)")
-                return
-
-            project_name = None
-            commitment_name = None
-            activity_date = None
-
-            i = 0
-            while i < len(other_args):
-                if other_args[i] == "--project" and i + 1 < len(other_args):
-                    project_name = other_args[i + 1]
-                    i += 2
-                elif other_args[i] == "--commitment" and i + 1 < len(other_args):
-                    commitment_name = other_args[i + 1]
-                    i += 2
-                elif other_args[i] == "--date" and i + 1 < len(other_args):
-                    activity_date = other_args[i + 1]
-                    i += 2
-                else:
-                    i += 1
-
-            if not project_name and not commitment_name:
-                print("Error: You must provide --project or --commitment")
-                print('Usage: uv run python query_grist.py log <content> --project "Project Name"')
-                print(
-                    '   or: uv run python query_grist.py log <content> --commitment "Commitment Name"'
-                )
-                return
-
-            if project_name and commitment_name:
-                print("Error: Provide --project OR --commitment, not both")
-                return
-
-            project_id = None
-            if project_name:
-                project = get_project(project_name)
-                if not project:
-                    print(f"Error: Project '{project_name}' not found")
-                    return
-                project_id = project["id"]
-                print(f"Logging to project: {project_name}")
-
-            commitment_id = None
-            if commitment_name:
-                commitment = get_commitment(commitment_name)
-                if not commitment:
-                    print(f"Error: Commitment '{commitment_name}' not found")
-                    return
-                commitment_id = commitment["id"]
-                print(f"Logging to commitment: {commitment_name}")
-
-            if activity_date:
-                print(f"Date: {activity_date}")
-
-            print(f"Content: {content}")
-            add_log_entry(
-                content=content,
-                project_id=project_id,
-                commitment_id=commitment_id,
-                activity_date=activity_date,
-            )
-
-        elif cmd == "status" and len(sys.argv) == 4:
-            set_status(sys.argv[2], sys.argv[3])
-
-        else:
-            print("Usage:")
-            print(
-                "  uv run python query_grist.py commitments                              # List all commitments"
-            )
-            print(
-                "  uv run python query_grist.py projects                                 # List all projects"
-            )
-            print(
-                "  uv run python query_grist.py query <name>                            # Query a commitment or project"
-            )
-            print(
-                "  uv run python query_grist.py log <content> --project <name>          # Add activity log entry"
-            )
-            print("      [--commitment <name>] [--date <date>]")
-            print(
-                "  uv run python query_grist.py log list [options]                      # List recent log entries"
-            )
-            print("      [--limit <n>] [--project <name>]")
-            print(
-                "  uv run python query_grist.py log view <query>                       # Search log entries by content"
-            )
-            print("      [--limit <n>]")
-            print(
-                "  uv run python query_grist.py log update <id>                        # Update a log entry"
-            )
-            print("      [--date <date>] [--content <text>]")
-            print(
-                "  uv run python query_grist.py log delete <id> [--yes]                # Delete a log entry"
-            )
-            print(
-                '  uv run python query_grist.py status "Project Name" <status>        # Set project status'
-            )
-            print("      Statuses: active, stalled, waiting, done")
+@app.command()
+def query(
+    name: str = typer.Argument(help="Commitment or project name"),
+):
+    """Query a commitment or project by name."""
+    commitment = get_commitment(name)
+    if commitment:
+        query_commitment(name)
     else:
-        print("Usage:")
-        print(
-            "  uv run python query_grist.py commitments                              # List all commitments"
-        )
-        print(
-            "  uv run python query_grist.py projects                                 # List all projects"
-        )
-        print(
-            "  uv run python query_grist.py query <name>                            # Query a commitment or project"
-        )
-        print(
-            "  uv run python query_grist.py log <content> --project <name>          # Add activity log entry"
-        )
-        print("      [--commitment <name>] [--date <date>]")
-        print(
-            "  uv run python query_grist.py log list [options]                      # List recent log entries"
-        )
-        print("      [--limit <n>] [--project <name>]")
-        print(
-            "  uv run python query_grist.py log view <query>                       # Search log entries by content"
-        )
-        print("      [--limit <n>]")
-        print(
-            "  uv run python query_grist.py log update <id>                        # Update a log entry"
-        )
-        print("      [--date <date>] [--content <text>]")
-        print(
-            "  uv run python query_grist.py log delete <id> [--yes]                # Delete a log entry"
-        )
-        print(
-            '  uv run python query_grist.py status "Project Name" <status>        # Set project status'
-        )
-        print("      Statuses: active, stalled, waiting, done")
+        project = get_project(name)
+        if project:
+            query_project(name)
+        else:
+            print(f"'{name}' not found as a commitment or project")
+
+
+@log_app.command()
+def add(
+    content: str = typer.Argument(help="Log message content"),
+    project: str | None = typer.Option(None, "--project", "-p", help="Project name"),
+    commitment: str | None = typer.Option(None, "--commitment", "-c", help="Commitment name"),
+    date: str | None = typer.Option(None, "--date", "-d", help="Activity date"),
+):
+    """Add a log entry."""
+    if not project and not commitment:
+        print("Error: You must provide --project or --commitment")
+        raise typer.Exit(1)
+    if project and commitment:
+        print("Error: Provide --project OR --commitment, not both")
+        raise typer.Exit(1)
+
+    project_id = None
+    if project:
+        p = get_project(project)
+        if not p:
+            print(f"Error: Project '{project}' not found")
+            raise typer.Exit(1)
+        project_id = p["id"]
+        print(f"Logging to project: {project}")
+
+    commitment_id = None
+    if commitment:
+        c = get_commitment(commitment)
+        if not c:
+            print(f"Error: Commitment '{commitment}' not found")
+            raise typer.Exit(1)
+        commitment_id = c["id"]
+        print(f"Logging to commitment: {commitment}")
+
+    if date:
+        print(f"Date: {date}")
+    print(f"Content: {content}")
+    add_log_entry(
+        content=content, project_id=project_id, commitment_id=commitment_id, activity_date=date
+    )
+
+
+@log_app.command(name="list")
+def list_entries(
+    limit: int = typer.Option(30, "--limit", "-l", help="Number of entries"),
+    project: str | None = typer.Option(None, "--project", "-p", help="Filter by project name"),
+):
+    """List recent log entries."""
+    list_logs(limit=limit, project_filter=project)
+
+
+@log_app.command()
+def view(
+    query: str = typer.Argument(help="Search term"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Number of entries"),
+):
+    """Search log entries by content."""
+    search_logs(query, limit=limit)
+
+
+@log_app.command()
+def update(
+    log_id: int = typer.Argument(help="Log entry ID"),
+    content: str | None = typer.Option(None, "--content", "-c", help="New content"),
+    date: str | None = typer.Option(None, "--date", "-d", help="New date"),
+):
+    """Update a log entry."""
+    update_log_entry(log_id, content=content, activity_date=date)
+
+
+@log_app.command()
+def delete(
+    log_id: int = typer.Argument(help="Log entry ID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+):
+    """Delete a log entry."""
+    if not yes:
+        data = grist_get("LogEntries")
+        if data:
+            log_ids = data.get("LogId", [])
+            content_list = data.get("Content", [])
+            dates = data.get("EffectiveDate", [])
+            for i in range(len(log_ids)):
+                if log_ids[i] == log_id:
+                    from datetime import datetime
+
+                    ts = dates[i] if i < len(dates) else None
+                    date_str = ""
+                    if isinstance(ts, (int, float)):
+                        date_str = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
+                    print(f"Log entry L#{log_id}: [{date_str}] {content_list[i][:80]}")
+                    break
+        print("Use --yes to confirm deletion")
+        raise typer.Exit(1)
+
+    delete_log_entry(log_id)
 
 
 if __name__ == "__main__":
-    main()
+    app()

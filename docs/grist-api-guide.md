@@ -103,7 +103,6 @@ WHERE l.Target_Commitment = 2 OR l.Target_Project IN (1,2)
 ---
 
 ## Document Info
-- **Doc ID:** `5ByZ5eWE2y8CPFsxY84L7J`
 - **Tables:** Tasks, Project, Commitments, LogEntries
 - **Key Relationships:**
   - Project.Commitment → Commitments.id (many-to-one)

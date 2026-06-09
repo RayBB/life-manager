@@ -25,3 +25,6 @@ preview = true
 
 [tool.ruff.lint]
 preview = true
+
+[tool.ruff.lint.per-file-ignores]
+"*grist*.py" = ["B008"]

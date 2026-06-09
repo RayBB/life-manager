@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from settings import settings
 
-app = typer.Typer()
+app = typer.Typer(no_args_is_help=True)
 GRIST_BASE_URL = f"https://docs.getgrist.com/api/docs/{settings.grist_doc_id}"
 TODOIST_BASE_URL = "https://api.todoist.com/api/v1"
 
@@ -191,6 +191,8 @@ async def sync_to_grist(tasks: list[TodoistTask], client: httpx.AsyncClient) -> 
 
 @app.command()
 def sync() -> None:
+    """Sync all active and completed Todoist tasks to Grist (default command)."""
+
     async def _run() -> None:
         async with httpx.AsyncClient(timeout=30.0) as client:
             active_tasks, completed_tasks = await asyncio.gather(
