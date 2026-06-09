@@ -15,6 +15,7 @@ import typer
 from pydantic import BaseModel, Field, field_validator
 
 from grist_api import grist_get, grist_patch, grist_post, rows_from_data
+from sync_todoist_to_grist import sync_if_due
 
 app = typer.Typer(no_args_is_help=True)
 log_app = typer.Typer(no_args_is_help=True)
@@ -23,6 +24,12 @@ project_app = typer.Typer(no_args_is_help=True)
 app.add_typer(log_app, name="log")
 app.add_typer(commitment_app, name="commitment")
 app.add_typer(project_app, name="project")
+
+
+@app.callback()
+def _pre_sync() -> None:
+    """Sync Todoist data before every command. Respects the 5-minute cooldown."""
+    asyncio.run(sync_if_due(quiet=True))
 
 
 class ProjectStatus(str, Enum):
