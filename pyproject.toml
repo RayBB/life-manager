@@ -7,3 +7,19 @@ requires-python = ">=3.14"
 dependencies = [
     "typer>=0.15",
 ]
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.46",
+    "ruff>=0.15",
+    "pre-commit>=4.6",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint]
+preview = true
