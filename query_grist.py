@@ -68,7 +68,7 @@ def _build_todoist_index(todoist_data):
                 "grist_id": ids[i] if i < len(ids) else None,
                 "content": content[i],
                 "labels": l,
-                "checked": todoist_data.get("Checked", [])[i]
+                "checked": todoist_data.get("Checked", [])[i] in (True, "True")
                 if i < len(todoist_data.get("Checked", []))
                 else False,
                 "due_date": todoist_data.get("DueDate", [])[i]
