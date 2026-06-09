@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -15,7 +15,7 @@ import typer
 from pydantic import BaseModel, Field, field_validator
 
 from grist_api import grist_get, grist_patch, grist_post, rows_from_data
-from sync_todoist_to_grist import sync_if_due
+from sync_todoist_to_grist import _last_sync_ago, sync_if_due
 
 app = typer.Typer(no_args_is_help=True)
 log_app = typer.Typer(no_args_is_help=True)
@@ -551,6 +551,213 @@ async def _get_log_data(log_id: int) -> dict | None:
     return None
 
 
+async def _get_overview_data() -> dict:
+    """Fetch everything needed for the daily overview dashboard."""
+    project_raw, todoist_raw, log_raw, commit_raw = await asyncio.gather(
+        grist_get("Project"),
+        grist_get("Todoist"),
+        grist_get("LogEntries"),
+        grist_get("Commitments"),
+    )
+
+    projects = rows_from_data(project_raw, GristProject) if project_raw else []
+    commitments = rows_from_data(commit_raw, Commitment) if commit_raw else []
+    todoist_items = rows_from_data(todoist_raw, TodoistItem) if todoist_raw else []
+    log_entries = rows_from_data(log_raw, LogEntry) if log_raw else []
+
+    todoist_index = _build_todoist_index(todoist_items)
+    log_index = _build_log_index(log_entries)
+    commitment_map = {c.id: c.title for c in commitments}
+    project_titles = {p.id: p.title for p in projects}
+
+    today = datetime.now(UTC)
+    today_str = today.strftime("%Y-%m-%d")
+    week_later_str = (today + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    stalled_or_untouched: list[dict[str, Any]] = []
+    tasks_needing_attention: list[dict[str, Any]] = []
+    total_upcoming = 0
+    total_due_this_week = 0
+    total_overdue = 0
+    active_project_count = 0
+    seen_task_ids: set[int] = set()
+
+    commitment_stats: dict[str, dict[str, int]] = {}
+
+    for p in projects:
+        if p.status == "done":
+            continue
+        active_project_count += 1
+        c_name = commitment_map.get(p.commitment) if p.commitment else None
+        last = await get_last_action_for_project(p.id, p.title, todoist_index, log_index)
+
+        # Days since last activity
+        days_since: int | None = None
+        if last and last.get("date"):
+            try:
+                d = datetime.strptime(last["date"], "%Y-%m-%d").replace(tzinfo=UTC)
+                days_since = (today - d).days
+            except ValueError:
+                pass
+
+        # Tasks for this project (project label + commitment label)
+        # Track whether each task matched via project label or commitment label
+        project_tasks: dict[int, TodoistItem] = {}
+        task_source: dict[int, str] = {}
+        for t in todoist_index.get(p.title, []):
+            project_tasks[t.id] = t
+            task_source[t.id] = "project"
+        if c_name:
+            for t in todoist_index.get(c_name, []):
+                if t.id not in project_tasks:
+                    project_tasks[t.id] = t
+                    task_source[t.id] = "commitment"
+
+        upcoming = [t for t in project_tasks.values() if not t.checked]
+        # Deduplicate across projects (same task may have multiple labels)
+        unique_upcoming = [t for t in upcoming if t.id not in seen_task_ids]
+        for t in unique_upcoming:
+            seen_task_ids.add(t.id)
+        upcoming = unique_upcoming
+
+        total_upcoming += len(upcoming)
+
+        # Classify tasks by urgency
+        due_this_week: list[dict[str, Any]] = []
+        overdue: list[dict[str, Any]] = []
+        no_due_date: list[dict[str, Any]] = []
+        for t in upcoming:
+            source = task_source.get(t.id, "project")
+            project_label = (
+                f"{c_name} (commitment)" if source == "commitment" and c_name else p.title
+            )
+            info: dict[str, Any] = {
+                "id": t.id,
+                "content": t.content,
+                "priority": t.priority,
+                "project": project_label,
+                "commitment": c_name,
+            }
+            if t.due_date:
+                d = t.due_date[:10]
+                info["due_date"] = d
+                if d < today_str:
+                    info["status"] = "overdue"
+                    overdue.append(info)
+                elif d <= week_later_str:
+                    info["status"] = "due_this_week"
+                    due_this_week.append(info)
+            else:
+                info["status"] = "no_due_date"
+                no_due_date.append(info)
+
+        total_due_this_week += len(due_this_week)
+        total_overdue += len(overdue)
+        tasks_needing_attention.extend(overdue + due_this_week + no_due_date)
+
+        # Track stalled / untouched
+        is_stalled = p.status == "stalled"
+        is_untouched = days_since is not None and days_since >= 7
+        no_activity = last is None
+
+        if is_stalled or is_untouched or no_activity:
+            stalled_or_untouched.append({
+                "title": p.title,
+                "commitment": c_name,
+                "status": p.status or "active",
+                "days_since_activity": days_since,
+                "no_activity_ever": no_activity,
+            })
+
+        # Commitment rollup
+        if c_name:
+            if c_name not in commitment_stats:
+                commitment_stats[c_name] = {
+                    "projects": 0,
+                    "stalled": 0,
+                    "untouched_7d": 0,
+                    "total_upcoming": 0,
+                    "due_this_week": 0,
+                    "overdue": 0,
+                }
+            commitment_stats[c_name]["projects"] += 1
+            if is_stalled:
+                commitment_stats[c_name]["stalled"] += 1
+            if is_untouched or no_activity:
+                commitment_stats[c_name]["untouched_7d"] += 1
+            commitment_stats[c_name]["total_upcoming"] += len(upcoming)
+            commitment_stats[c_name]["due_this_week"] += len(due_this_week)
+            commitment_stats[c_name]["overdue"] += len(overdue)
+
+    # Build commitment list
+    commitment_list = []
+    for c in commitments:
+        stats = commitment_stats.get(
+            c.title,
+            {
+                "projects": 0,
+                "stalled": 0,
+                "untouched_7d": 0,
+                "total_upcoming": 0,
+                "due_this_week": 0,
+                "overdue": 0,
+            },
+        )
+        commitment_list.append({"title": c.title, **stats})
+
+    # Sort tasks: overdue by date, then due this week by date, then no due date by priority
+    overdue_sorted = sorted(
+        tasks_needing_attention,
+        key=lambda x: (
+            0 if x["status"] == "overdue" else 1 if x["status"] == "due_this_week" else 2,
+            x.get("due_date", "9999-99-99"),
+            x.get("priority", 4),
+        ),
+    )
+
+    # Recent activity (last 10)
+    sorted_logs = sorted(log_entries, key=lambda x: x.effective_date or "", reverse=True)[:10]
+    recent = []
+    for e in sorted_logs:
+        proj_name = project_titles.get(e.target_project, "") if e.target_project else ""
+        recent.append({
+            "log_id": e.log_id,
+            "content": e.content[:120],
+            "date": format_timestamp(e.effective_date),
+            "project": proj_name,
+        })
+
+    # Count untouched (active projects with no activity in 7+ days)
+    untouched_count = sum(
+        1
+        for s in stalled_or_untouched
+        if s["status"] != "stalled"
+        and (s["days_since_activity"] is not None or s["no_activity_ever"])
+    )
+    stalled_count = sum(1 for s in stalled_or_untouched if s["status"] == "stalled")
+
+    ago_t = _last_sync_ago()
+    sync_str = f"{int(ago_t)}s ago" if ago_t is not None else "never"
+
+    return {
+        "generated_at": today.isoformat(),
+        "last_sync": sync_str,
+        "summary": {
+            "commitments": len(commitments),
+            "projects": active_project_count,
+            "stalled": stalled_count,
+            "untouched_7d": untouched_count,
+            "total_upcoming": total_upcoming,
+            "due_this_week": total_due_this_week,
+            "overdue": total_overdue,
+        },
+        "commitments": commitment_list,
+        "stalled_or_untouched": stalled_or_untouched,
+        "tasks_needing_attention": overdue_sorted,
+        "recent_activity": recent,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Display layer — sync functions that print formatted text
 # ---------------------------------------------------------------------------
@@ -697,6 +904,79 @@ def _display_log(data: dict) -> None:
     if data["project"]:
         print(f"Project: {data['project']}")
     print(f"\n{data['content']}")
+    print()
+
+
+def _display_overview(data: dict) -> None:
+    """Print the daily overview dashboard."""
+    summary = data["summary"]
+    print(f"\n{'=' * 60}")
+    print("          DASHBOARD")
+    print(f"{'=' * 60}")
+
+    # Summary line
+    print("\nSummary")
+    parts = [
+        f"{summary['commitments']} commitments",
+        f"{summary['projects']} projects",
+    ]
+    if summary["stalled"]:
+        parts.append(f"{summary['stalled']} stalled")
+    if summary["untouched_7d"]:
+        parts.append(f"{summary['untouched_7d']} untouched (7d+)")
+    print(f"  {' \u00b7 '.join(parts)}")
+
+    parts2 = []
+    if summary["total_upcoming"]:
+        parts2.append(f"{summary['total_upcoming']} upcoming tasks")
+    if summary["due_this_week"]:
+        parts2.append(f"{summary['due_this_week']} due this week")
+    if summary["overdue"]:
+        parts2.append(f"{summary['overdue']} overdue")
+    if parts2:
+        print(f"  {' \u00b7 '.join(parts2)}")
+    print(f"  Last sync: {data['last_sync']}")
+
+    # Stalled & untouched
+    stalled = [s for s in data["stalled_or_untouched"] if s["status"] == "stalled"]
+    untouched = [s for s in data["stalled_or_untouched"] if s["status"] != "stalled"]
+    if stalled or untouched:
+        print("\n\u26a0 Stalled & Untouched")
+        for s in stalled + untouched:
+            status_tag = s["status"]
+            if s["days_since_activity"] is not None:
+                age = f"{s['days_since_activity']}d no activity"
+            elif s["no_activity_ever"]:
+                age = "no activity ever"
+            else:
+                age = ""
+            c_name = f" [{s['commitment']}]" if s["commitment"] else ""
+            print(f"  \u2022 {s['title']:<30} {status_tag:<10} {age}{c_name}")
+
+    # Tasks needing attention
+    tasks = data["tasks_needing_attention"]
+    if tasks:
+        print("\n\U0001f4cb Tasks Needing Attention")
+        for status_label in ("overdue", "due_this_week", "no_due_date"):
+            group = [t for t in tasks if t["status"] == status_label]
+            if not group:
+                continue
+            label = status_label.replace("_", " ").upper()
+            print(f"\n  {label} ({len(group)})")
+            for t in group:
+                due = f"  {t['due_date']}  " if "due_date" in t else "  " + " " * 13
+                pri = f"P{t['priority']}"
+                proj = f" [{t['project']}]" if t["project"] else ""
+                print(f"    \u25cb {t['content'][:50]:<52} {due}{pri}{proj}")
+
+    # Recent activity
+    recent = data["recent_activity"]
+    if recent:
+        print("\n\U0001f4dd Recent Activity")
+        for e in recent[:5]:
+            lid = f"L#{e['log_id']}" if e["log_id"] else ""
+            proj = f"  [{e['project']}]" if e["project"] else ""
+            print(f"  {lid:<8} {e['date']}  {e['content'][:70]}{proj}")
     print()
 
 
@@ -956,6 +1236,22 @@ def query(
             _emit_json({"error": f"'{name}' not found as a commitment or project"})
         else:
             print(f"'{name}' not found as a commitment or project")
+
+    asyncio.run(_run())
+
+
+@app.command()
+def overview(
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Daily overview dashboard — stalled projects, tasks needing attention, recent activity."""
+
+    async def _run() -> None:
+        data = await _get_overview_data()
+        if json_output:
+            _emit_json(data)
+        else:
+            _display_overview(data)
 
     asyncio.run(_run())
 
