@@ -3,7 +3,7 @@
 Query Grist for Projects, Commitments, and Todoist tasks
 """
 
-from datetime import UTC
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -69,13 +69,12 @@ class LogEntry(BaseModel):
     log_id: int | None = Field(None, alias="LogId")
     content: str = Field("", alias="Content")
     effective_date: int | str | None = Field(None, alias="EffectiveDate")
-    created_at: Any | None = Field(None, alias="CreatedAt")
     target_project: int | None = Field(None, alias="Target_Project")
     target_commitment: int | None = Field(None, alias="Target_Commitment")
     target_task: int | None = Field(None, alias="Target_Task")
 
 
-def _rows(data: dict[str, Any] | None, model: type[BaseModel]) -> list[Any]:
+def _rows[M: BaseModel](data: dict[str, Any] | None, model: type[M]) -> list[M]:
     """Convert Grist columnar data to a list of model instances."""
     if not data:
         return []
@@ -199,8 +198,6 @@ def format_timestamp(ts: Any) -> str:
     if not ts:
         return ""
     if isinstance(ts, (int, float)):
-        from datetime import datetime
-
         return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
     return str(ts)[:10]
 
@@ -237,25 +234,30 @@ def query_commitment(name: str) -> None:
 
     print(f"\n--- Todoist Tasks ({name}) ---")
     tasks = grist_query_by_label(name)
+    _print_task_sections(tasks)
+    print()
+
+
+def _print_task_sections(tasks: list[TodoistItem]) -> None:
+    """Print upcoming and recently completed Todoist tasks."""
     if not tasks:
         print("  No tasks with this label")
-    else:
-        upcoming = [t for t in tasks if not t.checked]
-        completed = [t for t in tasks if t.checked]
-        upcoming.sort(key=lambda x: x.due_date or "zzz")
+        return
 
-        if upcoming:
-            print(f"\n  Upcoming ({len(upcoming)}):")
-            for t in upcoming:
-                due = f" (due: {t.due_string or t.due_date})" if t.due_string or t.due_date else ""
-                print(f"    \u25cb {t.content[:55]}{due}")
+    upcoming = [t for t in tasks if not t.checked]
+    completed = [t for t in tasks if t.checked]
+    upcoming.sort(key=lambda x: x.due_date or "zzz")
 
-        if completed:
-            print(f"\n  Recently Completed (showing {min(3, len(completed))}):")
-            for t in completed[:3]:
-                print(f"    \u2713 {t.content[:55]}")
+    if upcoming:
+        print(f"\n  Upcoming ({len(upcoming)}):")
+        for t in upcoming:
+            due = f" (due: {t.due_string or t.due_date})" if t.due_string or t.due_date else ""
+            print(f"    \u25cb {t.content[:55]}{due}")
 
-    print()
+    if completed:
+        print(f"\n  Recently Completed (showing {min(3, len(completed))}):")
+        for t in completed[:3]:
+            print(f"    \u2713 {t.content[:55]}")
 
 
 def query_project(name: str) -> None:
@@ -272,9 +274,9 @@ def query_project(name: str) -> None:
     if project.status:
         print(f"Status: {project.status}")
 
+    all_commitments = _rows(grist_get("Commitments"), Commitment)
     if project.commitment:
-        commitments = _rows(grist_get("Commitments"), Commitment)
-        for c in commitments:
+        for c in all_commitments:
             if c.id == project.commitment:
                 print(f"Commitment: {c.title}")
                 break
@@ -293,8 +295,7 @@ def query_project(name: str) -> None:
     project_tasks = grist_query_by_label(name)
     commitment_tasks: list[TodoistItem] = []
     if project.commitment:
-        commitments = _rows(grist_get("Commitments"), Commitment)
-        for c in commitments:
+        for c in all_commitments:
             if c.id == project.commitment:
                 commitment_tasks = grist_query_by_label(c.title)
                 break
@@ -306,20 +307,7 @@ def query_project(name: str) -> None:
     if not seen:
         print("  No tasks with this project's or commitment's label")
     else:
-        upcoming = [t for t in seen.values() if not t.checked]
-        completed = [t for t in seen.values() if t.checked]
-        upcoming.sort(key=lambda x: x.due_date or "zzz")
-
-        if upcoming:
-            print(f"\n  Upcoming ({len(upcoming)}):")
-            for t in upcoming:
-                due = f" (due: {t.due_string or t.due_date})" if t.due_string or t.due_date else ""
-                print(f"    \u25cb {t.content[:55]}{due}")
-
-        if completed:
-            print(f"\n  Recently Completed (showing {min(3, len(completed))}):")
-            for t in completed[:3]:
-                print(f"    \u2713 {t.content[:55]}")
+        _print_task_sections(list(seen.values()))
 
     print()
 
@@ -524,7 +512,7 @@ def list_logs(limit: int = 30, project_filter: str | None = None) -> None:
     for e in display:
         lid = f"L#{e['log_id']}" if e["log_id"] else "#?"
         proj = f" [{e['project']}]" if e["project"] else ""
-        print(f"  [{lid}] [{e['date']}]{proj} {(e.get('content') or '')[:60]}")
+        print(f"  [{lid}] [{e['date']}]{proj} {str(e.get('content', ''))[:60]}")
     print()
 
 
@@ -562,7 +550,7 @@ def search_logs(query: str, limit: int = 20) -> None:
     for e in matches:
         lid = f"L#{e['log_id']}" if e["log_id"] else "#?"
         proj = f" [{e['project']}]" if e["project"] else ""
-        print(f"  [{lid}] [{e['date']}]{proj} {(e.get('content') or '')[:60]}")
+        print(f"  [{lid}] [{e['date']}]{proj} {str(e.get('content', ''))[:60]}")
     print()
 
 
