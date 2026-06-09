@@ -15,7 +15,7 @@ import httpx
 import typer
 from pydantic import BaseModel, Field
 
-from grist_api import async_grist_get, async_grist_patch, async_grist_post
+from grist_api import grist_get, grist_patch, grist_post
 from settings import settings
 
 app = typer.Typer(no_args_is_help=True)
@@ -132,8 +132,8 @@ async def get_all_completed_tasks(client: httpx.AsyncClient) -> list[TodoistTask
     return transformed
 
 
-async def sync_to_grist(tasks: list[TodoistTask], client: httpx.AsyncClient) -> tuple[int, int]:
-    data = await async_grist_get("Todoist", client)
+async def sync_to_grist(tasks: list[TodoistTask]) -> tuple[int, int]:
+    data = await grist_get("Todoist")
     if data is None:
         return 0, 0
 
@@ -160,13 +160,13 @@ async def sync_to_grist(tasks: list[TodoistTask], client: httpx.AsyncClient) -> 
             records_to_add.append({"fields": fields})
 
     if records_to_add:
-        add_response = await async_grist_post("Todoist", records_to_add, client)
+        add_response = await grist_post("tables/Todoist/records", {"records": records_to_add})
         print(f"Added {len(records_to_add)} new tasks")
         if add_response.status_code not in (200, 201):
             print(f"Add error: {add_response.text}")
 
     if records_to_update:
-        update_response = await async_grist_patch("Todoist", records_to_update, client)
+        update_response = await grist_patch("Todoist", records_to_update)
         print(f"Updated {len(records_to_update)} existing tasks")
         if update_response.status_code not in (200, 201):
             print(f"Update error: {update_response.text}")
@@ -190,7 +190,7 @@ def sync() -> None:
                 print("No tasks to sync")
                 return
             print("Syncing to Grist...")
-            added, updated = await sync_to_grist(all_tasks, client)
+            added, updated = await sync_to_grist(all_tasks)
             print(f"Done! Added: {added}, Updated: {updated}")
 
     asyncio.run(_run())

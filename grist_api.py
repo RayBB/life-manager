@@ -1,4 +1,4 @@
-"""Shared Grist API client — sync and async wrappers."""
+"""Async Grist API client."""
 
 from __future__ import annotations
 
@@ -16,12 +16,9 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.grist_api_key}"}
 
 
-# ── Sync wrappers (for CLI queries) ──
-
-
-def grist_get(table: str) -> dict[str, Any] | None:
-    with httpx.Client(timeout=10.0) as client:
-        resp = client.get(
+async def grist_get(table: str) -> dict[str, Any] | None:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
             f"{GRIST_BASE_URL}/tables/{table}/data",
             headers=_auth_headers(),
         )
@@ -31,59 +28,22 @@ def grist_get(table: str) -> dict[str, Any] | None:
         return None
 
 
-def grist_patch(table: str, records: list[dict[str, Any]]) -> httpx.Response:
-    with httpx.Client(timeout=10.0) as client:
-        return client.patch(
+async def grist_patch(table: str, records: list[dict[str, Any]]) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        return await client.patch(
             f"{GRIST_BASE_URL}/tables/{table}/records",
             headers=_auth_headers(),
             json={"records": records},
         )
 
 
-def grist_post(path: str, json_body: Any) -> httpx.Response:
-    with httpx.Client(timeout=10.0) as client:
-        return client.post(
+async def grist_post(path: str, json_body: Any) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        return await client.post(
             f"{GRIST_BASE_URL}/{path}",
             headers=_auth_headers(),
             json=json_body,
         )
-
-
-# ── Async wrappers (for sync_todoist_to_grist.py) ──
-
-
-async def async_grist_get(table: str, client: httpx.AsyncClient) -> dict[str, Any] | None:
-    resp = await client.get(
-        f"{GRIST_BASE_URL}/tables/{table}/data",
-        headers=_auth_headers(),
-    )
-    if resp.status_code == 200:
-        return resp.json()
-    print(f"Failed to read Grist table {table}: {resp.status_code}")
-    return None
-
-
-async def async_grist_post(
-    table: str, records: list[dict[str, Any]], client: httpx.AsyncClient
-) -> httpx.Response:
-    return await client.post(
-        f"{GRIST_BASE_URL}/tables/{table}/records",
-        headers=_auth_headers(),
-        json={"records": records},
-    )
-
-
-async def async_grist_patch(
-    table: str, records: list[dict[str, Any]], client: httpx.AsyncClient
-) -> httpx.Response:
-    return await client.patch(
-        f"{GRIST_BASE_URL}/tables/{table}/records",
-        headers=_auth_headers(),
-        json={"records": records},
-    )
-
-
-# ── Data conversion ──
 
 
 def rows_from_data[M: BaseModel](data: dict[str, Any] | None, model: type[M]) -> list[M]:

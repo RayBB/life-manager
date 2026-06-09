@@ -3,6 +3,7 @@
 Query Grist for Projects, Commitments, and Todoist tasks
 """
 
+import asyncio
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -90,39 +91,38 @@ def _build_log_index(entries: list[LogEntry]) -> dict[int, list[LogEntry]]:
     return log_index
 
 
-def _log_id_to_grist_id(log_id: int) -> int | None:
+async def _log_id_to_grist_id(log_id: int) -> int | None:
     """Look up a Grist internal ID from a stable LogId."""
-    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
-    for e in entries:
+    for e in rows_from_data(await grist_get("LogEntries"), LogEntry):
         if e.log_id == log_id:
             return e.id
     return None
 
 
-def grist_query_by_label(label_name: str) -> list[TodoistItem]:
+async def grist_query_by_label(label_name: str) -> list[TodoistItem]:
     """Get all Todoist tasks with a specific label."""
-    items = rows_from_data(grist_get("Todoist"), TodoistItem)
+    items = rows_from_data(await grist_get("Todoist"), TodoistItem)
     index = _build_todoist_index(items)
     return index.get(label_name, [])
 
 
-def get_commitment(title: str) -> Commitment | None:
+async def get_commitment(title: str) -> Commitment | None:
     """Get a commitment by title."""
-    for c in rows_from_data(grist_get("Commitments"), Commitment):
+    for c in rows_from_data(await grist_get("Commitments"), Commitment):
         if c.title == title:
             return c
     return None
 
 
-def get_project(title: str) -> GristProject | None:
+async def get_project(title: str) -> GristProject | None:
     """Get a project by title."""
-    for p in rows_from_data(grist_get("Project"), GristProject):
+    for p in rows_from_data(await grist_get("Project"), GristProject):
         if p.title == title:
             return p
     return None
 
 
-def get_log_entries(
+async def get_log_entries(
     target_project_id: int | None = None,
     target_commitment_id: int | None = None,
     target_task_id: int | None = None,
@@ -135,7 +135,7 @@ def get_log_entries(
         entries.sort(key=lambda x: x.effective_date or "", reverse=True)
         return entries[:limit]
 
-    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(await grist_get("LogEntries"), LogEntry)
 
     if target_project_id:
         entries = [e for e in entries if e.target_project == target_project_id]
@@ -157,20 +157,27 @@ def format_timestamp(ts: Any) -> str:
     return str(ts)[:10]
 
 
-def query_commitment(name: str) -> None:
+async def query_commitment(name: str) -> None:
     """Query a commitment by name and show its projects, activity, and Todoist tasks."""
-    commitment = get_commitment(name)
+    commitment = await get_commitment(name)
     if not commitment:
         print(f"Commitment '{name}' not found")
         return
+
+    project_raw, log_raw, todoist_raw = await asyncio.gather(
+        grist_get("Project"),
+        grist_get("LogEntries"),
+        grist_get("Todoist"),
+    )
 
     print(f"\n{'=' * 60}")
     print(f"COMMITMENT: {name}")
     print(f"{'=' * 60}")
     print(f"\nDescription: {commitment.description or 'None'}")
 
-    projects = rows_from_data(grist_get("Project"), GristProject)
-    matching = [p for p in projects if p.commitment == commitment.id]
+    matching = [
+        p for p in rows_from_data(project_raw, GristProject) if p.commitment == commitment.id
+    ]
 
     print(f"\n--- Projects ({len(matching)}) ---")
     for p in matching:
@@ -178,7 +185,10 @@ def query_commitment(name: str) -> None:
         print(f"  \u2022 {p.title}{s_str}")
 
     print("\n--- Recent Activity ---")
-    activity = get_log_entries(target_commitment_id=commitment.id, limit=10)
+    all_logs = rows_from_data(log_raw, LogEntry)
+    activity = [e for e in all_logs if e.target_commitment == commitment.id]
+    activity.sort(key=lambda x: x.effective_date or "", reverse=True)
+    activity = activity[:10]
     if not activity:
         print("  No activity logged")
     else:
@@ -188,7 +198,7 @@ def query_commitment(name: str) -> None:
             print(f"  [{log_label}] [{date}] {a.content[:60]}")
 
     print(f"\n--- Todoist Tasks ({name}) ---")
-    tasks = grist_query_by_label(name)
+    tasks = _build_todoist_index(rows_from_data(todoist_raw, TodoistItem)).get(name, [])
     _print_task_sections(tasks)
     print()
 
@@ -215,12 +225,18 @@ def _print_task_sections(tasks: list[TodoistItem]) -> None:
             print(f"    \u2713 {t.content[:55]}")
 
 
-def query_project(name: str) -> None:
+async def query_project(name: str) -> None:
     """Query a project by name and show its info, activity, and Todoist tasks."""
-    project = get_project(name)
+    project = await get_project(name)
     if not project:
         print(f"Project '{name}' not found")
         return
+
+    commit_raw, log_raw, todoist_raw = await asyncio.gather(
+        grist_get("Commitments"),
+        grist_get("LogEntries"),
+        grist_get("Todoist"),
+    )
 
     print(f"\n{'=' * 60}")
     print(f"PROJECT: {name}")
@@ -229,7 +245,7 @@ def query_project(name: str) -> None:
     if project.status:
         print(f"Status: {project.status}")
 
-    all_commitments = rows_from_data(grist_get("Commitments"), Commitment)
+    all_commitments = rows_from_data(commit_raw, Commitment)
     if project.commitment:
         for c in all_commitments:
             if c.id == project.commitment:
@@ -237,7 +253,10 @@ def query_project(name: str) -> None:
                 break
 
     print("\n--- Recent Activity ---")
-    activity = get_log_entries(target_project_id=project.id, limit=10)
+    all_logs = rows_from_data(log_raw, LogEntry)
+    activity = [e for e in all_logs if e.target_project == project.id]
+    activity.sort(key=lambda x: x.effective_date or "", reverse=True)
+    activity = activity[:10]
     if not activity:
         print("  No activity logged")
     else:
@@ -247,12 +266,13 @@ def query_project(name: str) -> None:
             print(f"  [{log_label}] [{date}] {a.content[:60]}")
 
     print("\n--- Todoist Tasks ---")
-    project_tasks = grist_query_by_label(name)
+    todoist_index = _build_todoist_index(rows_from_data(todoist_raw, TodoistItem))
+    project_tasks = todoist_index.get(name, [])
     commitment_tasks: list[TodoistItem] = []
     if project.commitment:
         for c in all_commitments:
             if c.id == project.commitment:
-                commitment_tasks = grist_query_by_label(c.title)
+                commitment_tasks = todoist_index.get(c.title, [])
                 break
 
     seen: dict[int, TodoistItem] = {}
@@ -263,28 +283,30 @@ def query_project(name: str) -> None:
         print("  No tasks with this project's or commitment's label")
     else:
         _print_task_sections(list(seen.values()))
-
     print()
 
 
 @app.command()
 def commitments() -> None:
     """List all commitments."""
-    items = rows_from_data(grist_get("Commitments"), Commitment)
-    if not items:
-        print("No commitments found")
-        return
 
-    print(f"\n{'=' * 60}")
-    print(f"ALL COMMITMENTS ({len(items)})")
-    print(f"{'=' * 60}")
-    for c in items:
-        desc_str = f" - {c.description[:40]}..." if c.description else ""
-        print(f"  \u2022 {c.title}{desc_str}")
-    print()
+    async def _run():
+        items = rows_from_data(await grist_get("Commitments"), Commitment)
+        if not items:
+            print("No commitments found")
+            return
+        print(f"\n{'=' * 60}")
+        print(f"ALL COMMITMENTS ({len(items)})")
+        print(f"{'=' * 60}")
+        for c in items:
+            desc_str = f" - {c.description[:40]}..." if c.description else ""
+            print(f"  \u2022 {c.title}{desc_str}")
+        print()
+
+    asyncio.run(_run())
 
 
-def get_last_action_for_project(
+async def get_last_action_for_project(
     project_id: int,
     project_title: str,
     todoist_index: dict[str, list[TodoistItem]],
@@ -299,7 +321,7 @@ def get_last_action_for_project(
             best_date = t.due_date
             best = {"type": "Todoist", "content": t.content[:50], "date": t.due_date}
 
-    activity = get_log_entries(target_project_id=project_id, limit=1, log_index=log_index)
+    activity = await get_log_entries(target_project_id=project_id, limit=1, log_index=log_index)
     if activity:
         log_date = format_timestamp(activity[0].effective_date)
         if log_date and (best_date is None or log_date > best_date):
@@ -311,45 +333,56 @@ def get_last_action_for_project(
 @app.command()
 def projects() -> None:
     """List all projects with their commitment, status, and last action."""
-    project_list = rows_from_data(grist_get("Project"), GristProject)
-    if not project_list:
-        print("No projects found")
-        return
 
-    todoist_index = _build_todoist_index(rows_from_data(grist_get("Todoist"), TodoistItem))
-    log_index = _build_log_index(rows_from_data(grist_get("LogEntries"), LogEntry))
-    commitments = {c.id: c.title for c in rows_from_data(grist_get("Commitments"), Commitment)}
+    async def _run():
+        project_raw, todoist_raw, log_raw, commit_raw = await asyncio.gather(
+            grist_get("Project"),
+            grist_get("Todoist"),
+            grist_get("LogEntries"),
+            grist_get("Commitments"),
+        )
 
-    print(f"\n{'=' * 60}")
-    print(f"ALL PROJECTS ({len(project_list)})")
-    print(f"{'=' * 60}")
-    for p in project_list:
-        c_name = commitments.get(p.commitment) if p.commitment else None
-        c_str = f" [{c_name}]" if c_name else ""
-        s_str = f" ({p.status})" if p.status else ""
-        print(f"  \u2022 {p.title}{s_str}{c_str}")
+        project_list = rows_from_data(project_raw, GristProject)
+        if not project_list:
+            print("No projects found")
+            return
 
-        last = get_last_action_for_project(p.id, p.title, todoist_index, log_index)
-        if last:
-            print(f"      {last['type']}: {last['content']} ({last['date']})")
-    print()
+        todoist_index = _build_todoist_index(rows_from_data(todoist_raw, TodoistItem))
+        log_index = _build_log_index(rows_from_data(log_raw, LogEntry))
+        commitments = {c.id: c.title for c in rows_from_data(commit_raw, Commitment)}
+
+        print(f"\n{'=' * 60}")
+        print(f"ALL PROJECTS ({len(project_list)})")
+        print(f"{'=' * 60}")
+        for p in project_list:
+            c_name = commitments.get(p.commitment) if p.commitment else None
+            c_str = f" [{c_name}]" if c_name else ""
+            s_str = f" ({p.status})" if p.status else ""
+            print(f"  \u2022 {p.title}{s_str}{c_str}")
+
+            last = await get_last_action_for_project(p.id, p.title, todoist_index, log_index)
+            if last:
+                print(f"      {last['type']}: {last['content']} ({last['date']})")
+        print()
+
+    asyncio.run(_run())
 
 
-def _get_next_log_id() -> int:
+async def _get_next_log_id() -> int:
     """Find the next available LogId by taking max existing + 1."""
-    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
+    entries = rows_from_data(await grist_get("LogEntries"), LogEntry)
     valid = [e.log_id for e in entries if e.log_id is not None]
     return max(valid) + 1 if valid else 1
 
 
-def add_log_entry(
+async def add_log_entry(
     content: str,
     project_id: int | None = None,
     commitment_id: int | None = None,
     activity_date: str | None = None,
 ) -> bool:
     """Create a log entry in Grist's LogEntries table."""
-    log_id = _get_next_log_id()
+    log_id = await _get_next_log_id()
     fields: dict[str, Any] = {"Content": content, "LogId": log_id}
 
     if project_id:
@@ -359,7 +392,7 @@ def add_log_entry(
     if commitment_id:
         fields["Target_Commitment"] = commitment_id
 
-    resp = grist_post("tables/LogEntries/records", {"records": [{"fields": fields}]})
+    resp = await grist_post("tables/LogEntries/records", {"records": [{"fields": fields}]})
 
     if resp.status_code in (200, 201):
         print(f"\u2713 Log entry created (L#{log_id})")
@@ -370,11 +403,11 @@ def add_log_entry(
         return False
 
 
-def update_log_entry(
+async def update_log_entry(
     log_id: int, content: str | None = None, activity_date: str | None = None
 ) -> bool:
     """Update a log entry's content and/or date using its stable LogId."""
-    grist_id = _log_id_to_grist_id(log_id)
+    grist_id = await _log_id_to_grist_id(log_id)
     if grist_id is None:
         print(f"Error: No log entry found with LogId {log_id}")
         return False
@@ -389,7 +422,7 @@ def update_log_entry(
         print("Error: Nothing to update")
         return False
 
-    resp = grist_patch("LogEntries", [{"id": grist_id, "fields": fields}])
+    resp = await grist_patch("LogEntries", [{"id": grist_id, "fields": fields}])
 
     if resp.status_code in (200, 201):
         print(f"\u2713 Log entry L#{log_id} updated")
@@ -400,14 +433,14 @@ def update_log_entry(
         return False
 
 
-def delete_log_entry(log_id: int) -> bool:
+async def delete_log_entry(log_id: int) -> bool:
     """Delete a log entry from Grist using its stable LogId."""
-    grist_id = _log_id_to_grist_id(log_id)
+    grist_id = await _log_id_to_grist_id(log_id)
     if grist_id is None:
         print(f"Error: No log entry found with LogId {log_id}")
         return False
 
-    resp = grist_post("apply", [["BulkRemoveRecord", "LogEntries", [grist_id]]])
+    resp = await grist_post("apply", [["BulkRemoveRecord", "LogEntries", [grist_id]]])
 
     if resp.status_code in (200, 201):
         print(f"\u2713 Log entry L#{log_id} deleted")
@@ -418,19 +451,18 @@ def delete_log_entry(log_id: int) -> bool:
         return False
 
 
-def _build_project_titles() -> dict[int, str]:
-    """Build a dict mapping project id → project title."""
-    return {p.id: p.title for p in rows_from_data(grist_get("Project"), GristProject)}
-
-
-def list_logs(limit: int = 30, project_filter: str | None = None) -> None:
+async def list_logs(limit: int = 30, project_filter: str | None = None) -> None:
     """List all log entries with project names."""
-    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
+    log_raw, project_raw = await asyncio.gather(
+        grist_get("LogEntries"),
+        grist_get("Project"),
+    )
+    entries = rows_from_data(log_raw, LogEntry)
     if not entries:
         print("No log entries found")
         return
 
-    project_titles = _build_project_titles()
+    project_titles = {p.id: p.title for p in rows_from_data(project_raw, GristProject)}
 
     display = []
     for e in entries:
@@ -461,14 +493,18 @@ def list_logs(limit: int = 30, project_filter: str | None = None) -> None:
     print()
 
 
-def search_logs(query: str, limit: int = 20) -> None:
+async def search_logs(query: str, limit: int = 20) -> None:
     """Search log entries by content (case-insensitive)."""
-    entries = rows_from_data(grist_get("LogEntries"), LogEntry)
+    log_raw, project_raw = await asyncio.gather(
+        grist_get("LogEntries"),
+        grist_get("Project"),
+    )
+    entries = rows_from_data(log_raw, LogEntry)
     if not entries:
         print("No log entries found")
         return
 
-    project_titles = _build_project_titles()
+    project_titles = {p.id: p.title for p in rows_from_data(project_raw, GristProject)}
     q = query.lower()
 
     matches = []
@@ -505,35 +541,45 @@ def status(
     new_status: ProjectStatus = typer.Option(..., "--status", "-s", help="New status"),
 ) -> None:
     """Set the status of a project."""
-    project = get_project(project_name)
-    if not project:
-        print(f"Error: Project '{project_name}' not found")
-        raise typer.Exit(1)
 
-    resp = grist_patch("Project", [{"id": project.id, "fields": {"Status": new_status.value}}])
+    async def _run():
+        project = await get_project(project_name)
+        if not project:
+            print(f"Error: Project '{project_name}' not found")
+            raise typer.Exit(1)
 
-    if resp.status_code in (200, 201):
-        print(f"\u2713 {project_name} \u2192 {new_status.value}")
-    else:
-        print(f"\u2717 Failed to update status: {resp.status_code}")
-        print(f"  {resp.text}")
-        raise typer.Exit(1)
+        resp = await grist_patch(
+            "Project", [{"id": project.id, "fields": {"Status": new_status.value}}]
+        )
+
+        if resp.status_code in (200, 201):
+            print(f"\u2713 {project_name} \u2192 {new_status.value}")
+        else:
+            print(f"\u2717 Failed to update status: {resp.status_code}")
+            print(f"  {resp.text}")
+            raise typer.Exit(1)
+
+    asyncio.run(_run())
 
 
 @app.command()
 def query(name: str = typer.Argument(help="Commitment or project name")) -> None:
     """Query a commitment or project by name."""
-    commitment = get_commitment(name)
-    if commitment:
-        query_commitment(name)
-        return
 
-    project = get_project(name)
-    if project:
-        query_project(name)
-        return
+    async def _run():
+        commitment = await get_commitment(name)
+        if commitment:
+            await query_commitment(name)
+            return
 
-    print(f"'{name}' not found as a commitment or project")
+        project = await get_project(name)
+        if project:
+            await query_project(name)
+            return
+
+        print(f"'{name}' not found as a commitment or project")
+
+    asyncio.run(_run())
 
 
 @log_app.command()
@@ -544,37 +590,41 @@ def add(
     date: str | None = typer.Option(None, "--date", "-d", help="Activity date"),
 ) -> None:
     """Add a log entry."""
-    if not project and not commitment:
-        print("Error: You must provide --project or --commitment")
-        raise typer.Exit(1)
-    if project and commitment:
-        print("Error: Provide --project OR --commitment, not both")
-        raise typer.Exit(1)
 
-    project_id: int | None = None
-    if project:
-        p = get_project(project)
-        if not p:
-            print(f"Error: Project '{project}' not found")
+    async def _run():
+        if not project and not commitment:
+            print("Error: You must provide --project or --commitment")
             raise typer.Exit(1)
-        project_id = p.id
-        print(f"Logging to project: {project}")
-
-    commitment_id: int | None = None
-    if commitment:
-        c = get_commitment(commitment)
-        if not c:
-            print(f"Error: Commitment '{commitment}' not found")
+        if project and commitment:
+            print("Error: Provide --project OR --commitment, not both")
             raise typer.Exit(1)
-        commitment_id = c.id
-        print(f"Logging to commitment: {commitment}")
 
-    if date:
-        print(f"Date: {date}")
-    print(f"Content: {content}")
-    add_log_entry(
-        content=content, project_id=project_id, commitment_id=commitment_id, activity_date=date
-    )
+        project_id: int | None = None
+        if project:
+            p = await get_project(project)
+            if not p:
+                print(f"Error: Project '{project}' not found")
+                raise typer.Exit(1)
+            project_id = p.id
+            print(f"Logging to project: {project}")
+
+        commitment_id: int | None = None
+        if commitment:
+            c = await get_commitment(commitment)
+            if not c:
+                print(f"Error: Commitment '{commitment}' not found")
+                raise typer.Exit(1)
+            commitment_id = c.id
+            print(f"Logging to commitment: {commitment}")
+
+        if date:
+            print(f"Date: {date}")
+        print(f"Content: {content}")
+        await add_log_entry(
+            content=content, project_id=project_id, commitment_id=commitment_id, activity_date=date
+        )
+
+    asyncio.run(_run())
 
 
 @log_app.command(name="list")
@@ -583,7 +633,11 @@ def list_entries(
     project: str | None = typer.Option(None, "--project", "-p", help="Filter by project name"),
 ) -> None:
     """List recent log entries."""
-    list_logs(limit=limit, project_filter=project)
+
+    async def _run():
+        await list_logs(limit=limit, project_filter=project)
+
+    asyncio.run(_run())
 
 
 @log_app.command()
@@ -592,7 +646,11 @@ def search(
     limit: int = typer.Option(20, "--limit", "-l", help="Number of entries"),
 ) -> None:
     """Search log entries by content."""
-    search_logs(query_str, limit=limit)
+
+    async def _run():
+        await search_logs(query_str, limit=limit)
+
+    asyncio.run(_run())
 
 
 @log_app.command()
@@ -602,7 +660,11 @@ def update(
     date: str | None = typer.Option(None, "--date", "-d", help="New date"),
 ) -> None:
     """Update a log entry."""
-    update_log_entry(log_id, content=content, activity_date=date)
+
+    async def _run():
+        await update_log_entry(log_id, content=content, activity_date=date)
+
+    asyncio.run(_run())
 
 
 @log_app.command()
@@ -611,17 +673,20 @@ def delete(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ) -> None:
     """Delete a log entry."""
-    if not yes:
-        entries = rows_from_data(grist_get("LogEntries"), LogEntry)
-        for e in entries:
-            if e.log_id == log_id:
-                date_str = format_timestamp(e.effective_date)
-                print(f"Log entry L#{log_id}: [{date_str}] {e.content[:80]}")
-                break
-        print("Use --yes to confirm deletion")
-        raise typer.Exit(1)
 
-    delete_log_entry(log_id)
+    async def _run():
+        if not yes:
+            for e in rows_from_data(await grist_get("LogEntries"), LogEntry):
+                if e.log_id == log_id:
+                    date_str = format_timestamp(e.effective_date)
+                    print(f"Log entry L#{log_id}: [{date_str}] {e.content[:80]}")
+                    break
+            print("Use --yes to confirm deletion")
+            raise typer.Exit(1)
+
+        await delete_log_entry(log_id)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
