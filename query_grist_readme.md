@@ -135,9 +135,13 @@ uv run python query_grist.py log add "Kickoff meeting" --commitment "hackNY"
 # With a specific date/time for past events
 uv run python query_grist.py log add "Had a great meeting" --project "Garage City" --date "2026-06-02 2:30pm"
 
+# View and set project status
+uv run python query_grist.py status "Mobility Language Matters" --status active
+uv run python query_grist.py status "Garage City" -s stalled
+
 # Log list, search, update, delete
 uv run python query_grist.py log list --limit 10
-uv run python query_grist.py log view "meeting" --limit 5
+uv run python query_grist.py log search "meeting" --limit 5
 uv run python query_grist.py log update 42 --content "Updated text"
 uv run python query_grist.py log delete 42 --yes
 ```

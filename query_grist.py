@@ -557,7 +557,7 @@ def search_logs(query: str, limit: int = 20) -> None:
 @app.command()
 def status(
     project_name: str = typer.Argument(help="Name of the project"),
-    new_status: ProjectStatus = typer.Argument(help="New status"),
+    new_status: ProjectStatus = typer.Option(..., "--status", "-s", help="New status"),
 ) -> None:
     """Set the status of a project."""
     project = get_project(project_name)
@@ -642,7 +642,7 @@ def list_entries(
 
 
 @log_app.command()
-def view(
+def search(
     query_str: str = typer.Argument(help="Search term"),
     limit: int = typer.Option(20, "--limit", "-l", help="Number of entries"),
 ) -> None:
